@@ -1,0 +1,19 @@
+services:
+  mcp-tavily:
+    build: .
+    container_name: mcp-tavily
+    restart: always
+    volumes:
+      # 挂载 .env 以支持 ConfigManager 的热加载功能
+      - ./.env:/app/.env
+      # 挂载日志目录以便持久化查看
+      - ./logs:/app/logs
+    environment:
+      # 初始启动时从宿主机环境读取 Key
+      - TAVILY_API_KEYS=${TAVILY_API_KEYS}
+      - PYTHONUNBUFFERED=1
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
