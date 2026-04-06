@@ -7,27 +7,26 @@ import os
 # 将项目根目录加入路径
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app.main import mcp, key_manager
+from app.main import TavilyAggregator
 from app.core.key import Key, KeyStatus
 
 class TestMCPIntegration(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        """测试前准备：初始化 Mock Key 池"""
+        """测试前准备：初始化 TavilyAggregator 实例并 Mock Key 池"""
+        self.server = TavilyAggregator()
         self.test_keys = [Key("test-key-1"), Key("test-key-2")]
-        key_manager.update_keys(self.test_keys)
+        self.server.key_manager.update_keys(self.test_keys)
         # 重置索引
-        key_manager._index = 0
+        self.server.key_manager._index = 0
 
     @patch("app.main.TavilyClient")
     async def test_tavily_search_success(self, MockClient):
         """验证成功调用 tavily-search 工具"""
-        # 设置 Mock 响应
         mock_instance = MockClient.return_value
         mock_instance.search.return_value = {"results": [{"title": "Test Result", "url": "http://test.com"}]}
 
-        # 调用工具函数
-        from app.main import tavily_search
-        result = await tavily_search(query="hello")
+        # 直接调用实例方法
+        result = await self.server.tavily_search(query="hello")
 
         # 断言
         self.assertIn("results", result)
@@ -45,8 +44,7 @@ class TestMCPIntegration(unittest.IsolatedAsyncioTestCase):
             {"results": [{"title": "Success after retry"}]}
         ]
 
-        from app.main import tavily_search
-        result = await tavily_search(query="retry test")
+        result = await self.server.tavily_search(query="retry test")
 
         # 断言结果成功
         self.assertEqual(result["results"][0]["title"], "Success after retry")
@@ -58,8 +56,8 @@ class TestMCPIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_mcp_tools_registration(self):
         """验证所有官方工具是否已成功注册到 FastMCP"""
-        # 异步调用 _list_tools()
-        tools = await mcp._list_tools()
+        # 异步调用 _list_tools() (继承自父类)
+        tools = await self.server._list_tools()
         tool_names = [t.name for t in tools]
         
         expected_tools = ["tavily-search", "tavily-extract", "tavily-crawl", "tavily-map"]
