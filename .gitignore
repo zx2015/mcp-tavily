@@ -5,3 +5,10 @@ __pycache__/
 .venv/
 venv/
 .env
+
+# 调试/运行时日志与临时产物（不应提交到仓库）
+*.log
+logs/
+.mypy_cache/
+post_result.txt
+sse_stream.txt

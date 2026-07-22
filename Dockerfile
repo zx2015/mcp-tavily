@@ -21,6 +21,9 @@ RUN pip install --no-cache-dir \
 # 复制源代码
 COPY . .
 
+# 设置 PYTHONPATH 确保模块导入正确
+ENV PYTHONPATH=/app
+
 # 暴露端口（MCP 主要是 StdIO，但也支持 HTTP）
 EXPOSE 8000
 

@@ -42,26 +42,24 @@ python app/main.py
 
 ## 🛠️ MCP 客户端集成
 
-### 集成到 Cursor / Claude Desktop
+本服务仅通过 **Streamable HTTP** 协议提供 MCP 接口（不支持 stdio / SSE），默认监听地址为
+`http://<host>:8000/mcp`（可通过 `MCP_HOST` / `PORT` / `MCP_PATH` 环境变量调整）。
+
+### 集成到 Cursor / Claude Desktop 等支持 HTTP 的客户端
 在你的 MCP 配置文件（如 `mcp_config.json`）中添加以下配置：
 
 ```json
 {
   "mcpServers": {
     "mcp-tavily": {
-      "command": "docker",
-      "args": [
-        "exec",
-        "-i",
-        "mcp-tavily",
-        "python",
-        "app/main.py"
-      ]
+      "url": "http://127.0.0.1:18000/mcp",
+      "transport": "streamable-http"
     }
   }
 }
 ```
-*注：如果你直接运行 Python 脚本，请将 command 改为 `python` 并指向绝对路径。*
+*注：使用 `docker-compose up -d --build` 部署时，端口映射为宿主机 `18000` → 容器内 `8000`；
+本地直接运行 `python app/main.py` 时请改用 `http://127.0.0.1:8000/mcp`。*
 
 ## 📖 工具参考 (Tools)
 

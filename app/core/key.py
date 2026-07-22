@@ -19,7 +19,9 @@ class Key:
         self.cooldown_until: Optional[datetime] = None
         self.usage: int = 0
         self.limit: int = 0
-        self._lock = threading.Lock()
+        # 使用可重入锁：set_exhausted/set_active 会被 update_usage/check_status
+        # 在已持有该锁的情况下再次调用，普通 Lock 会导致死锁
+        self._lock = threading.RLock()
 
     def _mask_key(self, key: str) -> str:
         if len(key) <= 8:

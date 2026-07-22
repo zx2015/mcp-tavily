@@ -4,14 +4,18 @@ services:
     container_name: mcp-tavily
     restart: always
     volumes:
-      # 挂载 .env 以支持 ConfigManager 的热加载功能
       - ./.env:/app/.env
-      # 挂载日志目录以便持久化查看
       - ./logs:/app/logs
+    ports:
+      - "18000:8000"
     environment:
-      # 初始启动时从宿主机环境读取 Key
       - TAVILY_API_KEYS=${TAVILY_API_KEYS}
       - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
+      # Streamable HTTP 传输配置
+      - MCP_HOST=0.0.0.0
+      - PORT=8000
+      - MCP_PATH=/mcp
     logging:
       driver: "json-file"
       options:

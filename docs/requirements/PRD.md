@@ -2,6 +2,7 @@
 
 | 版本号 | 日期       | 变更说明 | 作者       |
 |--------|------------|----------|------------|
+| v1.4.0 | 2026-07-22 | 明确传输协议要求为 Streamable HTTP，移除 stdio/SSE 支持 | Copilot |
 | v1.3.0 | 2026-04-06 | 补充 Tool 描述同步策略 (Hardcoded Alignment) | Gemini CLI |
 | v1.2.0 | 2026-04-06 | 补充主动 Usage 检查、tavily-python 库集成 | Gemini CLI |
 | v1.1.0 | 2026-04-06 | 补充 Round Robin, 重试及 Cooldown 机制 | Gemini CLI |
@@ -25,6 +26,9 @@
 
 ### 2.2 技术栈要求
 - **核心框架:** 使用 `FastMCP` (Python SDK)。
+- **传输协议:** 仅使用 **Streamable HTTP**（`transport="streamable-http"`），不提供 stdio 或 SSE
+  传输方式；监听地址/端口/路径通过 `MCP_HOST` / `PORT` / `MCP_PATH` 环境变量配置（默认
+  `0.0.0.0:8000/mcp`）。
 - **API 交互:** 
   - 搜索/提取功能使用官方 `tavily-python` 库实现。
   - 监控功能直接调用 Tavily REST API (使用 `httpx`)。
