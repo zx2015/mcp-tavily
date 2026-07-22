@@ -183,6 +183,27 @@ curl -s -X POST http://127.0.0.1:8000/mcp \
   对齐官方 `@tavily/mcp` v0.2.4+。定期审计脚本 `scripts/sync_schemas.py` 当前**尚未实现**，
   缺口已记录于 `TODO.md`。
 
+## 🔍 Key 失效日志格式（v3.4.4+）
+
+服务会在三种"Key 失效"事件发生时写入**带位置 + 末 6 位脱敏**的日志，便于你在 `.env` 中
+快速定位是哪个 Key 出问题：
+
+| 事件 | 触发条件 | 日志级别 | 日志样例 |
+|------|----------|----------|----------|
+| 401 鉴权失败 | `str(e)` 含 `401` / `unauthorized` / `invalid` | `ERROR` | `[Key失效] 第 3 个 Key（尾号 xyz123）鉴权失败，已标记为 ERROR。原始错误: HTTP 401: Unauthorized` |
+| 配额耗尽 | Usage API 返回 `usage >= limit > 0` | `ERROR` | `[Key失效] 第 1 个 Key（尾号 abcdEF）配额耗尽 (1000/1000)，已标记为 EXHAUSTED` |
+| 限流冷却 | `str(e)` 含 `429` / `rate limit` | `WARNING` | `[Key限流] 第 2 个 Key（尾号 7g8h9i）触发限流，进入 60s 冷却。原始错误: HTTP 429: Rate Limit Exceeded` |
+| 配额查询 401 | Usage API 返回 401 | `ERROR` | `[Key失效] 第 4 个 Key（尾号 qwerty）使用情况查询返回 401（鉴权失败）。原始错误: Invalid API Key` |
+
+**关键设计点**：
+
+- **位置（"第 N 个 Key"）**：来自 `Key.position` 字段，1-based，由 `ConfigManager` 在解析
+  `.env` 时分配。`.env` 改动后**自动重新分配**（热加载会调用 `update_keys`）。
+- **尾号（末 6 位）**：与 `_mask_key` 的"前 4...后 4"格式不同；这里**只暴露末 6 位**以避免
+  反向推断完整 Key。脱敏的"信息熵"足够让你在 `.env` 里人肉对位但不足以恢复原 Key。
+- **配额耗尽日志仅打一次**：状态由非 EXHAUSTED 变为 EXHAUSTED 时打一行；后续轮询若仍
+  EXHAUSTED 不会刷屏。回归测试见 `tests/test_monitor.py::test_exhausted_log_emitted_only_on_transition`。
+
 ## 📚 相关文档
 
 - 架构概览：[`docs/design/ARCH_OVERVIEW.md`](docs/design/ARCH_OVERVIEW.md)

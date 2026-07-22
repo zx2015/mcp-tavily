@@ -29,14 +29,16 @@ class ConfigManager:
         keys_str = os.getenv("TAVILY_API_KEYS", "")
         if not keys_str:
             return []
-        
+
         raw_keys = [k.strip() for k in keys_str.split(",") if k.strip()]
         # 简单去重并保留顺序
         seen = set()
         unique_keys = []
-        for k in raw_keys:
+        # 使用 enumerate(start=1) 给每个 Key 分配 1-based 配置位置，
+        # 用于日志中"第 N 个 Key"的输出，便于用户在 .env 中定位。
+        for pos, k in enumerate(raw_keys, start=1):
             if k not in seen:
-                unique_keys.append(Key(k))
+                unique_keys.append(Key(k, position=pos))
                 seen.add(k)
         return unique_keys
 

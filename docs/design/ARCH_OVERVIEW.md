@@ -64,6 +64,12 @@
 - **并发安全:** 内部使用 `threading.RLock`（可重入锁）保护状态迁移。`update_usage`/
   `check_status` 会在已持有锁的情况下调用 `set_exhausted`/`set_active`，此前使用普通
   `threading.Lock` 会导致死锁（已修复）。
+- **位置 (`position`)**: v3.4.4 起新增 `position: Optional[int]` 字段（1-based），由
+  `ConfigManager._parse_keys()` 在解析 `TAVILY_API_KEYS` 时分配。用于在失效日志中输出
+  "第 N 个 Key"，便于用户在 `.env` 中定位。`.env` 热加载时会随 `update_keys()` 重新分配。
+- **末 6 位脱敏 (`tail`)**: v3.4.4 起新增 `tail` property，仅返回 Key 末 6 位
+  （不足 6 位时返回全 `*`）。**与 `_mask_key` 的"前 4...后 4"格式不同**：
+  `tail` 只暴露末 6 位以避免反向推断完整 Key，但足够用于在 `.env` 中人工对位。
 
 ### 3.4 UsageMonitor (后台任务)
 - **实现:** `asyncio.create_task` 启动永久循环任务。
@@ -168,16 +174,17 @@
 
 > 📌 **§6 实际异常处理策略（2026-07-22 同步）**:
 >
-> | 触发条件 | 识别方式（`str(e).lower()`） | 状态机动作 | 重试行为 |
-> |----------|------------------------------|------------|----------|
-> | Tavily 429 限流 | 包含 `429` 或 `rate limit` | `set_cooldown(60s)` → `COOLDOWN` | 立即换下一个 ACTIVE Key 重试 |
-> | Tavily 401 / 无效 Key | 包含 `401` / `unauthorized` / `invalid` | `status = ERROR` | 立即换下一个 ACTIVE Key 重试；ERROR 不会被自动恢复 |
-> | 5xx / 网络异常 | 其余 `Exception` | 状态不变 | 立即换下一个 ACTIVE Key 重试 |
-> | 用尽所有 Key | `tried_keys` 覆盖池 | — | 抛出原始最后一次异常 |
-> | 池中无 ACTIVE Key | `get_next_key()` 返回 `None` | — | 抛 `RuntimeError("No active API keys available in the pool.")` |
-> | `.env` 中无 Key | 启动时 | — | 启动 `start()` 阶段 `logger.error(...)` + `sys.exit(1)`（fail-fast） |
-> | Usage 401 | `response.status_code == 401` | 不变 | 仅记 ERROR 日志，不重试（避免对无效 Key 风暴） |
-> | Usage 网络异常 | `httpx` 异常 | 不变 | 仅记 ERROR 日志，下个周期再试 |
+> | 触发条件 | 识别方式（`str(e).lower()`） | 状态机动作 | 重试行为 | 失效日志（v3.4.4+） |
+> |----------|------------------------------|------------|----------|---------------------|
+> | Tavily 429 限流 | 包含 `429` 或 `rate limit` | `set_cooldown(60s)` → `COOLDOWN` | 立即换下一个 ACTIVE Key 重试 | `WARNING: [Key限流] 第 N 个 Key（尾号 xxxxxx）触发限流，进入 60s 冷却` |
+> | Tavily 401 / 无效 Key | 包含 `401` / `unauthorized` / `invalid` | `status = ERROR` | 立即换下一个 ACTIVE Key 重试；ERROR 不会被自动恢复 | `ERROR: [Key失效] 第 N 个 Key（尾号 xxxxxx）鉴权失败，已标记为 ERROR` |
+> | 5xx / 网络异常 | 其余 `Exception` | 状态不变 | 立即换下一个 ACTIVE Key 重试 | 维持原 `Key {label} failed` 简洁 warning |
+> | 用尽所有 Key | `tried_keys` 覆盖池 | — | 抛出原始最后一次异常 | — |
+> | 池中无 ACTIVE Key | `get_next_key()` 返回 `None` | — | 抛 `RuntimeError("No active API keys available in the pool.")` | — |
+> | `.env` 中无 Key | 启动时 | — | 启动 `start()` 阶段 `logger.error(...)` + `sys.exit(1)`（fail-fast） | — |
+> | Usage 401 | `response.status_code == 401` | 不变 | 仅记 ERROR 日志，不重试（避免对无效 Key 风暴） | `ERROR: [Key失效] 第 N 个 Key（尾号 xxxxxx）使用情况查询返回 401（鉴权失败）` |
+> | Usage 网络异常 | `httpx` 异常 | 不变 | 仅记 ERROR 日志，下个周期再试 | 原 `Error checking usage for Key {label}: {e}` |
+> | **配额耗尽 (EXHAUSTED)** | `usage >= limit > 0`（由 Usage Monitor 检测） | `set_exhausted()` | 不重试，由 Round Robin 自然跳过 | `ERROR: [Key失效] 第 N 个 Key（尾号 xxxxxx）配额耗尽 (usage/limit)，已标记为 EXHAUSTED`（**仅在状态转换时打一次**） |
 
 ## 7. 已知限制与差距 (Known Limitations & Gaps)
 

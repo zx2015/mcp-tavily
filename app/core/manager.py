@@ -63,16 +63,23 @@ class KeyPoolManager:
                 logger.warning(f"Key {key.label} failed: {e}")
 
                 if "429" in error_msg or "rate limit" in error_msg:
-                    logger.info(f"Key {key.label} hit rate limit. Setting cooldown.")
+                    logger.warning(
+                        f"[Key限流] 第 {key.position} 个 Key（尾号 {key.tail}）触发限流，"
+                        f"进入 60s 冷却。原始错误: {e}"
+                    )
                     key.set_cooldown(60)  # 默认冷却 60 秒
                 elif "401" in error_msg or "unauthorized" in error_msg or "invalid" in error_msg:
-                    logger.error(f"Key {key.label} is invalid. Marking as ERROR.")
+                    logger.error(
+                        f"[Key失效] 第 {key.position} 个 Key（尾号 {key.tail}）鉴权失败，"
+                        f"已标记为 ERROR。原始错误: {e}"
+                    )
                     key.status = KeyStatus.ERROR
-                
+                # 其它 5xx / 网络异常：仅 warning，不改状态
+
                 # 如果是最后一次尝试，则抛出异常
                 if attempt == max_retries - 1:
                     raise e
-                
+
                 # 继续尝试下一个 Key
                 continue
 

@@ -71,13 +71,40 @@ class TestCheckKeyUsage(unittest.IsolatedAsyncioTestCase):
     @patch("app.tasks.monitor.httpx.AsyncClient")
     async def test_marks_exhausted_when_usage_reaches_limit(self, MockAsyncClient):
         """usage >= limit 时应主动熔断为 EXHAUSTED（PRD 2.1 主动熔断要求）"""
-        key = Key("tvly-key-3")
+        key = Key("tvly-key-3", position=2)
+        # 末 6 位 = "ey-key"
+        key.raw_key = "tvly-fak-ey-key"
         mock_client = MockAsyncClient.return_value.__aenter__.return_value
         mock_client.get = AsyncMock(return_value=_mock_response(200, {"key": {"usage": 100, "limit": 100}}))
 
-        await check_key_usage(key)
+        with self.assertLogs("app.tasks.monitor", level="ERROR") as cm:
+            await check_key_usage(key)
 
         self.assertEqual(key.status, KeyStatus.EXHAUSTED)
+        joined = "\n".join(cm.output)
+        self.assertIn("[Key失效]", joined)
+        self.assertIn("第 2 个 Key", joined)
+        self.assertIn("尾号 ey-key", joined)  # 末 6 位
+
+    @patch("app.tasks.monitor.httpx.AsyncClient")
+    async def test_exhausted_log_emitted_only_on_transition(self, MockAsyncClient):
+        """回归测试：EXHAUSTED 日志仅在状态转换时打一次，避免每轮轮询都刷屏"""
+        key = Key("tvly-key-once", position=1)
+        mock_client = MockAsyncClient.return_value.__aenter__.return_value
+        mock_client.get = AsyncMock(return_value=_mock_response(200, {"key": {"usage": 100, "limit": 100}}))
+
+        # 第一次：ACTIVE → EXHAUSTED，应有 [Key失效] 日志
+        with self.assertLogs("app.tasks.monitor", level="ERROR") as cm1:
+            await check_key_usage(key)
+        self.assertIn("[Key失效]", "\n".join(cm1.output))
+        self.assertEqual(key.status, KeyStatus.EXHAUSTED)
+
+        # 第二次：EXHAUSTED → EXHAUSTED（无状态变化），不应再有 [Key失效] 日志
+        with self.assertLogs("app.tasks.monitor", level="INFO") as cm2:
+            await check_key_usage(key)
+        # 此时 key 已经 EXHAUSTED，usage 仍为 100/100，但不应再出现 [Key失效]
+        # cm2 只包含 INFO 级别，ERROR 级别的 [Key失效] 不会出现在这里
+        self.assertNotIn("[Key失效]", "\n".join(cm2.output))
 
     @patch("app.tasks.monitor.httpx.AsyncClient")
     async def test_handles_401_without_raising(self, MockAsyncClient):

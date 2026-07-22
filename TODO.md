@@ -6,8 +6,9 @@
 - [ ] 动态权重调度（根据剩余配额分配权重）— 优先级：低（README 后续规划）
 - [ ] 导出 Key 消耗报表 — 优先级：低（README 后续规划）
 - [ ] 支持通过 MCP Tool 动态添加 Key — 优先级：低（README 后续规划）
-- [ ] 支持动态添加/删除 API Key（PRD 5 后续规划）— 优先级：低
+- [ ] 支持动态添加/删除 API Key（PRD 5 后续规划）— 优先级：低（实际已通过 .env 热加载实现，PRD §5 已标注）
 - [ ] 增加监控仪表盘（PRD 5 后续规划）— 优先级：低
+- [ ] 让 `monitor_usage_task` 真正读取 `MONITOR_INTERVAL` 环境变量（当前硬编码 10 分钟）— 优先级：中 — 发现于 2026-07-22
 
 ## 已完成
 - [x] 初始化项目结构与 GEMINI.md — 2026-04-06
@@ -46,3 +47,11 @@
       挂载位置、三个模块日志均可被根 Handler 捕获、日志级别遵循 `LOG_LEVEL`；已重新构建
       容器镜像并实测 `docker logs`/`app.log` 中可见 `app.core.config`/`app.core.manager`
       日志 — 2026-07-22
+- [x] **功能增强｜Key 失效日志带位置 + 末 6 位脱敏** - `app/core/key.py` 新增 `position: Optional[int]`
+      字段（1-based，由 `ConfigManager` 解析 `TAVILY_API_KEYS` 时分配）和 `tail` property
+      （末 6 位脱敏，不足 6 位返回全 `*`）。`app/core/manager.py` 在 401 / 429 路径输出
+      `[Key失效] 第 N 个 Key（尾号 xxxxxx）...` 格式日志；`app/tasks/monitor.py` 在配额
+      耗尽转换（ACTIVE→EXHAUSTED）时输出同样格式日志，且仅在状态转换时打一次以避免刷屏。
+      新增 3 个回归测试覆盖三种事件 + 转换去重行为（`tests/test_integration.py::test_401/429_*`、
+      `tests/test_monitor.py::test_exhausted_log_emitted_only_on_transition`）。测试套件
+      25/25 通过 — 2026-07-22

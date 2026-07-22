@@ -2,7 +2,7 @@ import asyncio
 import httpx
 import logging
 from typing import List, Callable
-from app.core.key import Key
+from app.core.key import Key, KeyStatus
 
 logger = logging.getLogger(__name__)
 
@@ -18,15 +18,32 @@ async def check_key_usage(key: Key):
                 data = response.json()
                 usage = data.get("key", {}).get("usage", 0)
                 limit = data.get("key", {}).get("limit", 0)
-                
+
                 # 如果没有设置 key limit，则尝试使用 account plan_limit
                 if limit == 0:
                     limit = data.get("account", {}).get("plan_limit", 0)
-                
+
+                # 在 update_usage 之前记录旧状态，以便检测"刚发生的 EXHAUSTED 转换"
+                previous_status = key.status
                 key.update_usage(usage, limit)
                 logger.info(f"Key {key.label} usage synced: {usage}/{limit}")
+
+                # 主动熔断事件：配额耗尽（PRD §2.1）。仅在状态由非 EXHAUSTED 变为 EXHAUSTED
+                # 时打一次日志，避免每轮轮询都重复刷。
+                if (
+                    usage >= limit > 0
+                    and previous_status != KeyStatus.EXHAUSTED
+                    and key.status == KeyStatus.EXHAUSTED
+                ):
+                    logger.error(
+                        f"[Key失效] 第 {key.position} 个 Key（尾号 {key.tail}）配额耗尽 "
+                        f"({usage}/{limit})，已标记为 EXHAUSTED"
+                    )
             elif response.status_code == 401:
-                logger.error(f"Key {key.label} usage check failed: Invalid API Key (401)")
+                logger.error(
+                    f"[Key失效] 第 {key.position} 个 Key（尾号 {key.tail}）"
+                    f"使用情况查询返回 401（鉴权失败）。原始错误: Invalid API Key"
+                )
             else:
                 logger.warning(f"Key {key.label} usage check failed with status {response.status_code}")
     except Exception as e:
