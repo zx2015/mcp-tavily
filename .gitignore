@@ -4,7 +4,12 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# 敏感配置：.env 本身以及所有变体（.env.local / .env.production / .env.development 等）
+# 注意：.env.example 模板必须被追踪！下面的否定规则重新放行它。
 .env
+.env.*
+!.env.example
 
 # 调试/运行时日志与临时产物（不应提交到仓库）
 *.log
@@ -12,3 +17,11 @@ logs/
 .mypy_cache/
 post_result.txt
 sse_stream.txt
+
+# 其他常见敏感文件
+*.pem
+*.key
+id_rsa*
+secrets/
+.credentials/
+

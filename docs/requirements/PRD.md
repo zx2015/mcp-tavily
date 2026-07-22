@@ -45,6 +45,9 @@
 ### 2.4 部署规范
 - **容器化:** 编写 `Dockerfile` 及 `docker-compose.yml`。
 - **日志轮转:** 实现日志文件的按天或按大小轮转。
+  > ℹ️ **当前实现状态（2026-07-22 同步）**: 仅按大小轮转，由 `app/utils/logger.py` 的
+  > `RotatingFileHandler(maxBytes=5MB, backupCount=5)` 实现；**按天轮转尚未实现**，
+  > 缺口已记录于 `TODO.md`。
 
 ## 3. 业务逻辑流程 (Business Flow)
 
@@ -95,6 +98,13 @@ graph TD
 └── docker-compose.yml
 ```
 
+> ⚠️ **目录结构与代码同步状态（2026-07-22）**:
+> - `app/`, `tests/`, `docs/`, `Dockerfile`, `docker-compose.yml` 均已存在。
+> - `scripts/sync_schemas.py` **暂未实现**，与 PRD §2.3 的"定期审计"要求存在差距，缺口已记录于 `TODO.md`。
+
 ## 5. 后续规划
 - 支持动态添加/删除 API Key。
+  > ✅ **已于 v1.1.0 实现**: `app/core/config.py` 的 `ConfigManager` 监听 `.env` 文件变更
+  > （默认 5 秒间隔），调用 `KeyPoolManager.update_keys()` 完成热替换，无需重启服务。
+  > 本条目保留作为 PRD 历史规划记录。
 - 增加监控仪表盘。
