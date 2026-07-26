@@ -69,6 +69,48 @@ class TestCheckKeyUsage(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(key.limit, 500)
 
     @patch("app.tasks.monitor.httpx.AsyncClient")
+    async def test_handles_null_limit_for_unlimited_key_without_crashing(self, MockAsyncClient):
+        """回归测试：Tavily /usage 接口对无限额度的 Key 返回 `"limit": null`（而非省略该字段），
+        此前代码用 `dict.get("limit", 0)` 取默认值，但字段存在且值为 None 时不会触发默认值，
+        导致 `limit` 一路为 None 传入 Key.update_usage()，触发
+        `TypeError: '>=' not supported between instances of 'int' and 'NoneType'`。
+        该 Bug 在 UsageMonitor 后台任务此前从未被真正启动过时长期潜伏，直到修复了
+        lifespan 注册 Bug（见 tests/test_lifespan.py）后才在生产环境中真实触发。
+        """
+        key = Key("tvly-unlimited-key")
+        mock_client = MockAsyncClient.return_value.__aenter__.return_value
+        mock_client.get = AsyncMock(
+            return_value=_mock_response(
+                200, {"key": {"usage": 42, "limit": None}, "account": {"plan_limit": None}}
+            )
+        )
+
+        # 不应抛出异常（此前会在 check_key_usage 内部被吞掉变成 ERROR 日志，
+        # 但 usage/limit 永远不会被真正更新——本测试直接断言不出现该错误路径）
+        with self.assertNoLogs("app.tasks.monitor", level="ERROR"):
+            await check_key_usage(key)
+
+        self.assertEqual(key.usage, 42)
+        self.assertEqual(key.limit, 0)  # key.limit 和 account.plan_limit 均为 null，回退为 0（无限制）
+        self.assertEqual(key.status, KeyStatus.ACTIVE)
+
+    @patch("app.tasks.monitor.httpx.AsyncClient")
+    async def test_null_key_limit_falls_back_to_account_plan_limit(self, MockAsyncClient):
+        """`key.limit` 为 null 但 `account.plan_limit` 有值时，应正确回退使用后者"""
+        key = Key("tvly-key-null-limit")
+        mock_client = MockAsyncClient.return_value.__aenter__.return_value
+        mock_client.get = AsyncMock(
+            return_value=_mock_response(
+                200, {"key": {"usage": 30, "limit": None}, "account": {"plan_limit": 1000}}
+            )
+        )
+
+        await check_key_usage(key)
+
+        self.assertEqual(key.usage, 30)
+        self.assertEqual(key.limit, 1000)
+
+    @patch("app.tasks.monitor.httpx.AsyncClient")
     async def test_marks_exhausted_when_usage_reaches_limit(self, MockAsyncClient):
         """usage >= limit 时应主动熔断为 EXHAUSTED（PRD 2.1 主动熔断要求）"""
         key = Key("tvly-key-3", position=2)

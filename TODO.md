@@ -55,3 +55,44 @@
       新增 3 个回归测试覆盖三种事件 + 转换去重行为（`tests/test_integration.py::test_401/429_*`、
       `tests/test_monitor.py::test_exhausted_log_emitted_only_on_transition`）。测试套件
       25/25 通过 — 2026-07-22
+- [x] **生产故障加固｜DNS 解析失败导致工具调用失败 + 阻塞事件循环** - 排查容器日志发现
+      `api.tavily.com` 出现过 2 次瞬时 DNS 解析失败（`NameResolutionError`/`Failed to resolve`），
+      每次约 30-40 秒后自愈；在 OpenCode 中配置本 MCP 时用户实际遇到该故障（工具调用直接报错）。
+      根因：4 个 Key 共享同一域名，DNS 故障时轮换 Key 完全无效——`KeyPoolManager.execute_with_retry`
+      此前只认识 429/401，对网络层错误只是简单换下一个 Key，白白耗尽整个 Key 轮询预算却始终
+      无法恢复。另排查发现 `app/main.py` 的 4 个工具方法直接同步调用 `TavilyClient`（底层
+      `requests` 阻塞 I/O），未做线程隔离，导致一次慢请求/网络抖动会阻塞整个事件循环，
+      拖慢同一时刻其他所有并发 MCP 请求。
+      **修复:**
+      1. `app/core/manager.py` 新增 `_is_network_error()` 识别 DNS/连接类异常关键字，命中时
+         **在同一个 Key 上**做最多 `NETWORK_ERROR_MAX_RETRIES`（默认 2 次）指数退避快速重试
+         （0.5s→1.0s），不轮换 Key、不修改 Key 状态；重试预算耗尽后才回退到原有的 Key 轮换逻辑。
+      2. `app/main.py` 的 4 个工具方法改为 `await asyncio.to_thread(client.search, ...)` 等，
+         阻塞调用移入线程池，事件循环不再被单次请求独占。
+      新增 3 个回归测试：`test_dns_failure_retries_in_place_without_burning_key_budget`、
+      `test_dns_failure_falls_through_to_next_key_after_exhausting_quick_retries`、
+      `test_tavily_search_runs_blocking_call_in_thread`（`tests/test_integration.py`）。
+      测试套件 28/28 通过，mypy 无报错，已重新构建并部署容器验证 Streamable HTTP 接口正常 — 2026-07-26
+- [x] **重大 Bug 修复｜UsageMonitor 后台任务从未真正启动过** - 排查上述 DNS 加固时顺带发现：
+      `app/main.py::_register_lifespan` 用 `@self.lifespan()` 装饰器"注册" `aggregator_lifespan`，
+      但当前 `fastmcp` 版本中 `FastMCP.lifespan` 是普通的 `@asynccontextmanager` 实例方法
+      （非装饰器工厂）；`self.lifespan()` 返回的上下文管理器对象恰好可被当装饰器调用（不报错），
+      但从未把 `aggregator_lifespan` 真正设为 `server._lifespan`（一直是 fastmcp 内置的
+      `default_lifespan`）。结果：`monitor_usage_task` 这个后台任务**自项目上线以来从未运行过**，
+      且没有任何异常/错误日志，只能通过"预期日志从不出现"间接发现。PRD §2.1"主动配额监控/
+      主动熔断"因此完全没有生效过。
+      **修复:** 改为在 `TavilyAggregator.__init__` 中通过 `FastMCP(lifespan=self._aggregator_lifespan)`
+      构造函数参数注册（`LifespanCallable` 唯一受支持的方式），为此把 `key_manager` 等依赖初始化
+      提前到 `super().__init__()` 之前；后台任务保存为 `self._monitor_task` 便于测试断言。
+      新增 `tests/test_lifespan.py`（3 个用例）验证 `_lifespan` 不再是 `default_lifespan`、
+      任务真正运行、退出时被正确取消 — 2026-07-26
+- [x] **连带 Bug 修复｜`/usage` 接口 `limit: null` 导致 TypeError** - 上一条修复让 UsageMonitor
+      首次真正运行后，立刻在生产容器中对全部 4 个 Key 触发
+      `TypeError: '>=' not supported between instances of 'int' and 'NoneType'`。根因：Tavily
+      `/usage` 接口对无限额度的 Key 返回 `"limit": null`（字段存在但值为 `None`，而非省略该字段），
+      `dict.get("limit", 0)` 的默认值只在字段缺失时生效，字段存在但为 `None` 时仍返回 `None`，
+      一路传入 `Key.update_usage()` 触发比较异常。已在 `app/tasks/monitor.py::check_key_usage`
+      显式判断 `is None`，`limit`/`account.plan_limit` 均为 `None` 时统一回退为 `0`。新增 2 个
+      回归测试：`test_handles_null_limit_for_unlimited_key_without_crashing`、
+      `test_null_key_limit_falls_back_to_account_plan_limit`（`tests/test_monitor.py`）。
+      重新构建部署容器后实测：4 个 Key 全部正常同步（如 `4/1000`、`180/1000`），无异常日志 — 2026-07-26

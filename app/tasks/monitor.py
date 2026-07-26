@@ -16,12 +16,23 @@ async def check_key_usage(key: Key):
             response = await client.get(USAGE_URL, headers=headers)
             if response.status_code == 200:
                 data = response.json()
-                usage = data.get("key", {}).get("usage", 0)
-                limit = data.get("key", {}).get("limit", 0)
+                key_info = data.get("key") or {}
+                account_info = data.get("account") or {}
 
-                # 如果没有设置 key limit，则尝试使用 account plan_limit
-                if limit == 0:
-                    limit = data.get("account", {}).get("plan_limit", 0)
+                usage = key_info.get("usage")
+                if usage is None:
+                    usage = 0
+
+                # Tavily /usage 接口对"无限额度"的 Key 会返回 `"limit": null`（而非缺省该字段），
+                # dict.get(key, default) 只在字段缺失时才用 default，字段存在但值为 None 时仍
+                # 返回 None——因此必须显式判断 None，否则 limit 会一路是 None 传入
+                # Key.update_usage()，触发 `usage >= limit > 0` 的 TypeError（int 与 None 比较）。
+                limit = key_info.get("limit")
+                if limit is None or limit == 0:
+                    # key 级别未设置限制（或显式为 0），尝试使用 account 级别的 plan_limit
+                    limit = account_info.get("plan_limit")
+                    if limit is None:
+                        limit = 0
 
                 # 在 update_usage 之前记录旧状态，以便检测"刚发生的 EXHAUSTED 转换"
                 previous_status = key.status

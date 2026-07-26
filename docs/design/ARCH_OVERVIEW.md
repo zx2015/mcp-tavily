@@ -2,6 +2,8 @@
 
 | 版本号 | 日期       | 变更说明 | 作者       |
 |--------|------------|----------|------------|
+| v1.6.0 | 2026-07-26 | 修复 lifespan 注册 Bug（monitor_usage_task 从未真正启动过）+ /usage 接口 limit:null 导致的 TypeError | Copilot |
+| v1.5.0 | 2026-07-26 | 加固：网络层错误（DNS/连接失败）原地快速重试 + 阻塞调用移入线程池，修复"api.tavily.com DNS 解析失败"导致的工具调用故障与事件循环阻塞 | Copilot |
 | v1.4.0 | 2026-07-22 | 修复日志系统未捕获 app.core/app.tasks 模块日志的问题 | Copilot |
 | v1.3.0 | 2026-07-22 | 传输协议改为仅支持 Streamable HTTP，移除 stdio/SSE | Copilot |
 | v1.2.0 | 2026-07-22 | 修复 UsageMonitor 鉴权 Bug 及 Key 状态机死锁 Bug，补充回归测试 | Copilot |
@@ -54,6 +56,14 @@
 - **算法:** **Round Robin (轮询)**。
 - **并发处理:** 使用 `asyncio.Lock` 确保线程安全。
 - **重试逻辑:** 捕获 429/5xx 异常，自动触发 `get_next_key()` 重试。
+- **网络层错误的原地快速重试（2026-07-26 加固）:** `_is_network_error()` 识别 DNS 解析失败
+  （`NameResolutionError`/`Failed to resolve`/`gaierror` 等）、连接失败（`ConnectionError`/
+  `Connection refused`/`Max retries exceeded` 等）类异常。这类错误的根因是所有 Key 共享同一个
+  `api.tavily.com` 域名，轮换 Key 无法规避——因此不像 429/401 那样切换到下一个 Key 或修改
+  Key 状态，而是在**同一个 Key 上**做最多 `NETWORK_ERROR_MAX_RETRIES`（默认 2）次指数退避快速
+  重试（0.5s→1.0s→...），为常见的秒级 DNS/网络瞬时抖动争取自愈时间；重试预算耗尽后才按原有
+  逻辑轮换到下一个 Key，且不将该 Key 标记为 COOLDOWN/ERROR。参见
+  `tests/test_integration.py::test_dns_failure_retries_in_place_without_burning_key_budget`。
 
 ### 3.3 Key Entity (状态机)
 每个 Key 拥有以下状态：
@@ -77,6 +87,15 @@
 - **鉴权:** 每次请求使用对应 `Key.raw_key` 构造 `Authorization` 请求头（Bearer Token），
   确保配额查询针对的是真实的目标 Key（历史版本曾误用占位符导致请求恒为 401，已修复并补充回归测试
   `tests/test_monitor.py::test_sends_correct_bearer_authorization_header`）。
+- **`limit` 字段的 null 处理（2026-07-26 修复）:** Tavily `/usage` 接口对无限额度的 Key 会返回
+  `"limit": null`（字段存在但值为 `None`），而非省略该字段——`dict.get("limit", 0)` 只在字段
+  缺失时才生效默认值，字段存在但为 `None` 时仍返回 `None`。历史版本因此会把 `None` 一路传入
+  `Key.update_usage()`，触发 `TypeError: '>=' not supported between instances of 'int' and
+  'NoneType'`。该 Bug 长期潜伏未被发现——因为触发条件（UsageMonitor 后台任务真正运行）本身
+  依赖 §3.8 所述的 lifespan 注册修复；一旦后台任务开始真正轮询，几乎每个 Key 每轮都会命中。
+  现已显式判断 `is None`，`limit`/`account.plan_limit` 均为 `None` 时统一回退为 `0`（无限制）。
+  回归测试：`tests/test_monitor.py::test_handles_null_limit_for_unlimited_key_without_crashing`、
+  `test_null_key_limit_falls_back_to_account_plan_limit`。
 
 ### 3.5 传输层 (Transport)
 - **协议:** 仅支持 **Streamable HTTP**（`fastmcp` `transport="streamable-http"`），不再支持
@@ -97,7 +116,44 @@
 - **级别:** 根 Logger 级别读取 `LOG_LEVEL` 环境变量（默认 `INFO`），确保 INFO 级别的运行时事件
   也能被记录，而不是默认丢弃在 Python 根 Logger 的 `WARNING` 级别之下。
 
-### 3.7 客户端接入 (Client Integration)
+### 3.7 阻塞调用隔离（2026-07-26 加固）
+- **问题:** `tavily-python` 的 `TavilyClient` 底层使用 `requests`（同步阻塞 I/O）。
+  `app/main.py` 中 `tavily_search`/`tavily_extract`/`tavily_crawl`/`tavily_map` 虽然是
+  `async def`，但历史版本直接在协程内同步调用 `client.search(...)` 等方法——由于整个服务是
+  单进程单事件循环（Streamable HTTP 下 uvicorn 默认 `workers=None`），任意一次 Tavily API
+  调用在等待网络响应期间会**整个占满事件循环**，导致同一时刻其他所有并发 MCP 请求（包括
+  别的客户端的工具调用、`tools/list` 等协议消息）全部被阻塞排队；网络抖动/DNS 故障期间
+  这一问题被进一步放大（详见 §3.2 网络层错误处理）。
+- **修复:** 4 个工具方法的 `_call()` 闭包改为 `await asyncio.to_thread(client.search, **kwargs)`
+  等形式，把阻塞调用放到线程池执行，事件循环可继续处理其他并发请求。回归测试见
+  `tests/test_integration.py::test_tavily_search_runs_blocking_call_in_thread`（验证阻塞期间
+  另一个协程仍能被正常调度）。
+- **说明:** 这不是"连接数限制"的修复——uvicorn/FastMCP 本身对并发连接数没有显式上限
+  （`limit_concurrency=None`），限制的是"有效并发处理能力"；此修复解除了因阻塞调用导致的
+  隐性串行化瓶颈。
+
+### 3.8 Lifespan 注册修复（2026-07-26 加固）
+- **问题:** 历史版本用 `@self.lifespan()` 装饰器"注册" `aggregator_lifespan`（负责启停
+  `monitor_usage_task` 后台任务），但当前 `fastmcp` 版本中 `FastMCP.lifespan` 是一个普通的
+  `@asynccontextmanager` **实例方法**（用于 `async with server.lifespan():` 汇总所有 Provider
+  的生命周期），不是装饰器工厂。`self.lifespan()` 返回的异步上下文管理器对象恰好是可调用的
+  （`contextlib` 的 `AsyncContextDecorator` 支持把上下文管理器当装饰器用），因此
+  `@self.lifespan()` 这样写**不会报错**，但实际效果只是把 `aggregator_lifespan` 包了一层从未
+  被调用的装饰壳——从未把它设为 `server._lifespan`（后者始终是 `fastmcp` 内置的
+  `default_lifespan`）。结果是 `monitor_usage_task` 这个后台任务**从未被启动过**，且没有任何
+  异常或错误日志；PRD §2.1 要求的"主动配额监控 / 主动熔断"因此长期完全不生效，只能在实际
+  部署容器中通过"预期日志完全不出现"间接发现（详见 TODO.md 对应条目）。
+- **修复:** 改为在 `TavilyAggregator.__init__` 中通过 `FastMCP` 构造函数的 `lifespan=` 关键字
+  参数传入 `self._aggregator_lifespan`（这是 `LifespanCallable` 唯一受支持的注册方式）。为此
+  需要把 `key_manager` 等依赖的初始化提前到 `super().__init__()` 之前，因为 `_aggregator_lifespan`
+  在构造期间就需要被引用。同时把创建的后台任务保存为 `self._monitor_task` 属性，便于测试直接
+  断言其运行/取消状态。
+- **连带发现:** 由于该后台任务此前从未真正运行过，修复后它第一次真实执行就立刻暴露了另一个
+  潜伏 Bug——`/usage` 接口对无限额度 Key 返回 `"limit": null`，触发 `TypeError`（见 §3.4）。
+- **回归测试:** `tests/test_lifespan.py`（3 个用例）验证 `server._lifespan` 不再是
+  `default_lifespan`、后台任务在生命周期内真正运行、退出时被正确取消。
+
+### 3.9 客户端接入 (Client Integration)
 
 - **协议:** MCP Streamable HTTP（`POST /mcp`）。
 - **接入端点（按部署方式）**:
@@ -178,7 +234,8 @@
 > |----------|------------------------------|------------|----------|---------------------|
 > | Tavily 429 限流 | 包含 `429` 或 `rate limit` | `set_cooldown(60s)` → `COOLDOWN` | 立即换下一个 ACTIVE Key 重试 | `WARNING: [Key限流] 第 N 个 Key（尾号 xxxxxx）触发限流，进入 60s 冷却` |
 > | Tavily 401 / 无效 Key | 包含 `401` / `unauthorized` / `invalid` | `status = ERROR` | 立即换下一个 ACTIVE Key 重试；ERROR 不会被自动恢复 | `ERROR: [Key失效] 第 N 个 Key（尾号 xxxxxx）鉴权失败，已标记为 ERROR` |
-> | 5xx / 网络异常 | 其余 `Exception` | 状态不变 | 立即换下一个 ACTIVE Key 重试 | 维持原 `Key {label} failed` 简洁 warning |
+> | **DNS/连接失败等网络层错误（v1.5.0 新增）** | 命中 `_NETWORK_ERROR_KEYWORDS`（`nameresolutionerror`/`failed to resolve`/`connection refused`/`max retries exceeded` 等） | **状态不变**（不冷却、不标记 ERROR——所有 Key 共享同一域名，非 Key 本身问题） | **同一 Key 原地**指数退避快速重试，最多 `NETWORK_ERROR_MAX_RETRIES`（默认 2 次，0.5s→1.0s）；用尽后才轮换下一个 Key | `WARNING: [网络错误] 第 N 个 Key（尾号 xxxxxx）遇到网络层错误（DNS 解析/连接失败），Xs 后原地快速重试（i/2）` |
+> | 5xx / 其它网络异常（未命中网络错误关键字，或已用尽快速重试预算） | 其余 `Exception` | 状态不变 | 立即换下一个 ACTIVE Key 重试 | 维持原 `Key {label} failed` 简洁 warning |
 > | 用尽所有 Key | `tried_keys` 覆盖池 | — | 抛出原始最后一次异常 | — |
 > | 池中无 ACTIVE Key | `get_next_key()` 返回 `None` | — | 抛 `RuntimeError("No active API keys available in the pool.")` | — |
 > | `.env` 中无 Key | 启动时 | — | 启动 `start()` 阶段 `logger.error(...)` + `sys.exit(1)`（fail-fast） | — |
